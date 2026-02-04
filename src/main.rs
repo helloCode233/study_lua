@@ -20,7 +20,7 @@ fn main() {
         Instruction::Return { src: 1 },             // return R2
     ];
 
-    let mut vm = Vm::new(reg_count, consts, code,regs);
+    let mut vm = Vm::new(reg_count,consts,code,regs);
 
     let ret = vm.run();
     println!("ret = {:?}", ret); // 期望 Number(3.0)
