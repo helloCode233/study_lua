@@ -1,5 +1,5 @@
-use chatGpt_lua::{Instruction, OpCode, Operand, Value};
-use chatGpt_lua::vm::{Vm};
+use study_lua::{Instruction, OpCode, Operand, Value};
+use study_lua::vm::{Vm};
 
 fn main() {
     // 常量表：K0=1, K1=2
