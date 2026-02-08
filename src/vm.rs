@@ -1,15 +1,15 @@
-use crate::{Instruction, OpCode, Operand, Value};
+use crate::opcode::{Opcode, a, b, bx, c, sbx};
+use crate::{ Operand, Value};
+
 pub struct Vm {
     regs: Vec<Value>,
     consts: Vec<Value>,
-    code: Vec<Instruction>,
-    pc: usize,
+    code: Vec<u32>,
+    pc: isize,
 }
 
-
-
 impl Vm {
-    pub fn new(reg_count: usize, consts: Vec<Value>, code: Vec<Instruction>,regs:Vec<Value>) -> Self {
+    pub fn new(reg_count: usize, consts: Vec<Value>, code: Vec<u32>, regs: Vec<Value>) -> Self {
         Self {
             regs,
             consts,
@@ -18,14 +18,12 @@ impl Vm {
         }
     }
 
-
     fn as_number(v: &Value) -> f64 {
         match v {
             Value::Number(n) => *n,
             _ => panic!("type error: expected number, got {:?}", v),
         }
     }
-
 
     fn read_rk(&self, rk: u32) -> &Value {
         match Operand::decode(rk) {
@@ -34,27 +32,46 @@ impl Vm {
         }
     }
 
-
-
     pub fn run(&mut self) -> Value {
         loop {
-            let i = self.code[self.pc].clone();
+            let i = &self.code[self.pc as usize];
             self.pc += 1;
 
-            match i {
-                Instruction::LoadK { dst, k } => {
-                    self.regs[dst] = self.consts[k].clone();
+            match Opcode::decode(i) {
+                Opcode::LoadK => {
+                    self.regs[a(i) as usize] = self.consts[bx(i) as usize].clone();
                 }
-                Instruction::Move { dst, src } => {
-                    self.regs[dst] = self.regs[src].clone();
+                Opcode::Move => {
+                    self.regs[a(i) as usize] = self.regs[b(i) as usize].clone();
                 }
-                Instruction::AddRK { dst, x, y } => {
-                    let a = Self::as_number(self.read_rk(x));
-                    let b = Self::as_number(self.read_rk(y));
-                    self.regs[dst] = Value::Number(a + b);
+                // 当 a = false  eq == true  jmp ==
+                // 当 a = true   eq == false jmp !=
+                Opcode::Eq => {
+                    let x = Self::as_number(self.read_rk(b(i)));
+                    let y = Self::as_number(self.read_rk(c(i)));
+                    if (x == y) != (a(i) == 1) {
+                        self.pc += 1;
+                    }
                 }
-                Instruction::Return { src } => {
-                    return self.regs[src].clone();
+                Opcode::Add => {
+                    let x = Self::as_number(self.read_rk(b(i)));
+                    let y = Self::as_number(self.read_rk(c(i)));
+                    self.regs[a(i) as usize] = Value::Number(x + y);
+                }
+                Opcode::Return => {
+                    return self.regs[a(i) as usize].clone();
+                }
+                Opcode::Jmp => {
+                    self.pc += sbx(i) as isize;
+                }
+                // true <  false >
+                Opcode::Lt => {
+                    let x = Self::as_number(self.read_rk(b(i)));
+                    let y = Self::as_number(self.read_rk(c(i)));
+                    let lt = x < y;
+                    if lt != (a(i) == 1) {
+                        self.pc += 1;
+                    }
                 }
             }
         }
