@@ -62,6 +62,16 @@ impl Vm {
                     let y = Self::as_number(&self.rk_get(proto_id, c(&i))?)?;
                     self.rset(a(&i), Value::Number(x + y))?;
                 }
+                Opcode::Mul => {
+                    let x = Self::as_number(&self.rk_get(proto_id, b(&i))?)?;
+                    let y = Self::as_number(&self.rk_get(proto_id, c(&i))?)?;
+                    self.rset(a(&i), Value::Number(x * y))?;
+                }
+                Opcode::Div => {
+                    let x = Self::as_number(&self.rk_get(proto_id, b(&i))?)?;
+                    let y = Self::as_number(&self.rk_get(proto_id, c(&i))?)?;
+                    self.rset(a(&i), Value::Number(x / y))?;
+                }
                 Opcode::Vararg => {
                     let a_field = a(&i);
                     let b_field = b(&i);
@@ -84,6 +94,92 @@ impl Vm {
                             varargs.get(i).cloned().unwrap_or(Value::Nil),
                         )?;
                     }
+                }
+                Opcode::Closure => {
+                    let a_field = a(&i);
+                    let child_proto_id = bx(&i) as usize;
+
+                    // CLOSURE A Bx（Lua 风格，简化实现）：
+                    // - 根据 child proto 的 upvalue 描述创建闭包
+                    // - instack=true：捕获当前寄存器槽位（open upvalue，可共享）
+                    // - instack=false：从当前函数自身 upvalues 转发同一个共享单元
+                    let up_descs = {
+                        let proto = self
+                            .protos
+                            .get(child_proto_id)
+                            .ok_or_else(|| Self::proto_oob(child_proto_id, self.protos.len()))?;
+                        proto.upvalues.clone()
+                    };
+                    let (frame_base, frame_top, parent_upvalues) = {
+                        let fr = self.lua_frame()?;
+                        (fr.base, fr.top, fr.upvalues.clone())
+                    };
+                    let mut captured = Vec::with_capacity(up_descs.len());
+                    for desc in up_descs {
+                        if desc.instack {
+                            let stack_index = frame_base + desc.index;
+                            if stack_index >= frame_top {
+                                return Err(Self::oob(stack_index, frame_top));
+                            }
+                            captured.push(self.capture_upvalue(stack_index));
+                        } else {
+                            captured.push(parent_upvalues.get(desc.index).cloned().ok_or_else(
+                                || VmError::UpvalueOutOfBounds {
+                                    index: desc.index,
+                                    len: parent_upvalues.len(),
+                                },
+                            )?);
+                        }
+                    }
+                    self.rset(
+                        a_field,
+                        Value::Closure {
+                            proto_id: child_proto_id,
+                            upvalues: captured,
+                        },
+                    )?;
+                }
+                Opcode::GetUpval => {
+                    let a_field = a(&i);
+                    let b_field = b(&i) as usize;
+
+                    // GETUPVAL A B：R[A] = upvalue[B]
+                    let (upvalue, len) = {
+                        let fr = self.lua_frame()?;
+                        (fr.upvalues.get(b_field).cloned(), fr.upvalues.len())
+                    };
+                    let upvalue = upvalue.ok_or(VmError::UpvalueOutOfBounds {
+                        index: b_field,
+                        len,
+                    })?;
+                    let value = self.read_upvalue(&upvalue)?;
+                    self.rset(a_field, value)?;
+                }
+                Opcode::SetUpval => {
+                    let a_field = a(&i);
+                    let b_field = b(&i) as usize;
+
+                    // SETUPVAL A B：upvalue[B] = R[A]
+                    let value = self.rget(a_field)?.clone();
+                    let (upvalue, len) = {
+                        let fr = self.lua_frame()?;
+                        (fr.upvalues.get(b_field).cloned(), fr.upvalues.len())
+                    };
+                    let upvalue = upvalue.ok_or(VmError::UpvalueOutOfBounds {
+                        index: b_field,
+                        len,
+                    })?;
+                    self.write_upvalue(&upvalue, value)?;
+                }
+                Opcode::Close => {
+                    let a_field = a(&i) as usize;
+
+                    // CLOSE A：关闭当前帧中 `R[A]` 及其以上槽位关联的 open upvalue。
+                    let close_from = {
+                        let fr = self.lua_frame()?;
+                        fr.base + a_field
+                    };
+                    self.close_upvalues_from(close_from)?;
                 }
                 Opcode::Call => {
                     let b_field = b(&i);
@@ -154,6 +250,54 @@ impl Vm {
                     self.tail_call(func_index, nargs)?;
                     continue;
                 }
+                Opcode::TForCall => {
+                    let a_field = a(&i) as usize;
+                    let c_field = c(&i) as usize;
+                    let (base, func_index) = {
+                        let fr = self.lua_frame()?;
+                        let base = fr.base;
+                        (base, base + a_field)
+                    };
+
+                    // TFORCALL A C（Lua 5.x 泛型 for）：
+                    // - 调用 generator：R[A](R[A+1], R[A+2])
+                    // - 把结果写回 R[A+3]..（共 C 个）
+                    //
+                    // 这里用 `call_with_results_target` 指定“返回值写回起点”，
+                    // 避免普通 CALL 把结果写回函数槽位。
+                    let return_target = base + a_field + 3;
+                    self.lua_frame_mut()?.pc += 1;
+                    self.call_with_results_target(
+                        func_index,
+                        2,
+                        ResultsSpec::Fixed(c_field),
+                        return_target,
+                    )?;
+                    continue;
+                }
+                Opcode::TForLoop => {
+                    let a_field = a(&i) as usize;
+                    let (base, jump_delta) = {
+                        let fr = self.lua_frame()?;
+                        (fr.base, sbx(&i) as isize)
+                    };
+                    let idx_pos = base + a_field + 3;
+                    let ctrl_pos = base + a_field + 2;
+                    let idx_val = self
+                        .stack
+                        .get(idx_pos)
+                        .cloned()
+                        .ok_or_else(|| Self::oob(idx_pos, self.stack.len()))?;
+
+                    // TFORLOOP A sBx（Lua 5.x）：
+                    // - 若 R(A+3) != nil：把它回写到 R(A+2) 并跳转到循环体
+                    // - 若 R(A+3) == nil：不跳转，循环结束
+                    if !matches!(idx_val, Value::Nil) {
+                        self.ensure_stack_space(ctrl_pos + 1);
+                        self.stack[ctrl_pos] = idx_val;
+                        self.lua_frame_mut()?.pc += jump_delta;
+                    }
+                }
                 Opcode::Return => {
                     let (func_index, results, base) = {
                         let fr = self.lua_frame()?;
@@ -193,6 +337,10 @@ impl Vm {
                         }
                         out
                     };
+
+                    // 函数返回会离开当前栈帧；必须先封闭本帧 open upvalue，
+                    // 避免后续 top 收缩后 upvalue 仍悬挂到无效栈槽位。
+                    self.close_current_frame_upvalues()?;
 
                     // 弹出 callee。
                     self.frames.pop();
@@ -269,6 +417,13 @@ impl Vm {
                     let y = Self::as_number(&self.rk_get(proto_id, c(&i))?)?;
                     let lt = x < y;
                     if lt != (a(&i) == 1) {
+                        self.lua_frame_mut()?.pc += 1;
+                    }
+                }
+                Opcode::Test => {
+                    let truthy = !matches!(self.rget(a(&i))?, Value::Nil | Value::Bool(false));
+                    let expected = c(&i) == 1;
+                    if truthy != expected {
                         self.lua_frame_mut()?.pc += 1;
                     }
                 }

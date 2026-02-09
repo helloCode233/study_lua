@@ -1,5 +1,5 @@
 use crate::vm::model::ResultsSpec;
-use crate::vm::model::{CallFrame, Vm};
+use crate::vm::model::{CallFrame, UpvalueRef, Vm};
 use crate::{Value, VmError};
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -39,6 +39,21 @@ impl Vm {
         nargs: usize,
         results: ResultsSpec,
     ) -> Result<(), VmError> {
+        self.call_with_results_target(func_index, nargs, results, func_index)
+    }
+
+    /// 建立一个 Lua 调用帧，并允许指定“返回值写回起点”。
+    ///
+    /// 默认 CALL 会把返回值写回到函数槽位本身（`return_target == func_index`）。
+    /// 但像 TFORCALL 这类指令需要把返回值写到其它寄存器区间（例如 `R(A+3)` 起），
+    /// 因此这里单独抽象成可配置写回目标的入口。
+    pub(crate) fn call_with_results_target(
+        &mut self,
+        func_index: usize,
+        nargs: usize,
+        results: ResultsSpec,
+        return_target: usize,
+    ) -> Result<(), VmError> {
         // 栈布局（Lua 风格）：
         // - stack[func_index] 是被调函数对象
         // - 参数区从 stack[func_index + 1] 开始，连续 nargs 个
@@ -54,20 +69,18 @@ impl Vm {
             .cloned()
             .ok_or_else(|| Self::oob(func_index, self.stack.len()))?;
 
-        let proto_id = match func_val {
-            Value::LFn(pid) => pid,
-            other => return Err(VmError::NotCallable(other)),
-        };
+        let (proto_id, upvalues) = Self::resolve_callable(func_val)?;
 
         let (base, top_cap, varargs) = self.prepare_callee_frame(proto_id, func_index, nargs)?;
 
         self.frames.push(CallFrame {
             proto_id: Some(proto_id),
             pc: 0,
-            func: func_index,
+            func: return_target,
             base,
             top: top_cap,
             varargs,
+            upvalues,
             results,
         });
         Ok(())
@@ -90,10 +103,10 @@ impl Vm {
             .cloned()
             .ok_or_else(|| Self::oob(func_index, self.stack.len()))?;
 
-        let proto_id = match func_val {
-            Value::LFn(pid) => pid,
-            other => return Err(VmError::NotCallable(other)),
-        };
+        let (proto_id, upvalues) = Self::resolve_callable(func_val)?;
+
+        // TailCall 会替换当前帧；在离开当前帧前必须先封闭其 open upvalue。
+        self.close_current_frame_upvalues()?;
 
         let (base, top_cap, varargs) = self.prepare_callee_frame(proto_id, func_index, nargs)?;
 
@@ -110,8 +123,21 @@ impl Vm {
         fr.base = base;
         fr.top = top_cap;
         fr.varargs = varargs;
+        fr.upvalues = upvalues;
         fr.results = results;
         Ok(())
+    }
+
+    /// 把可调用值解包为 `(proto_id, upvalues)`。
+    ///
+    /// - `LFn`：无 upvalues
+    /// - `Closure`：携带 upvalue 共享单元
+    fn resolve_callable(value: Value) -> Result<(usize, Vec<UpvalueRef>), VmError> {
+        match value {
+            Value::LFn(pid) => Ok((pid, vec![])),
+            Value::Closure { proto_id, upvalues } => Ok((proto_id, upvalues)),
+            other => Err(VmError::NotCallable(other)),
+        }
     }
 
     /// 按 Lua 5.x 的规则整理参数/varargs，并计算 callee 的寄存器窗口。

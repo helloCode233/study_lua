@@ -1,13 +1,22 @@
 use crate::opcode::BITRK;
+use crate::vm::model::UpvalueRef;
 
+pub mod frontend;
 pub mod opcode;
 pub mod proto;
 pub mod vm;
+pub use frontend::CompileError;
+pub use frontend::{compile_file, compile_str};
 
 #[derive(Clone, Debug)]
 pub enum Value {
     Number(f64),
     LFn(usize),
+    /// 闭包值（proto_id + 捕获到的 upvalue 共享单元）。
+    Closure {
+        proto_id: usize,
+        upvalues: Vec<UpvalueRef>,
+    },
     Bool(bool),
     Nil,
 }
@@ -23,7 +32,7 @@ pub enum VmError {
     UnknownOpcode(u32),
     /// 保留：历史上用于拒绝 B=0/C=0（变参/多返回）模式；当前实现已支持，一般不会再返回该错误。
     UnsupportedCall { b: u32, c: u32 },
-    /// 被调用值不是可调用对象（当前只支持 `Value::LFn`）。
+    /// 被调用值不是可调用对象（当前支持 `Value::LFn` / `Value::Closure`）。
     NotCallable(Value),
     /// 访问原型表越界。
     ProtoOutOfBounds { index: usize, len: usize },
@@ -31,6 +40,8 @@ pub enum VmError {
     TypeError { expected: &'static str, got: Value },
     /// 任意栈/常量等索引越界（替代 `Vec[idx]` 的 panic）。
     StackOutOfBounds { index: usize, len: usize },
+    /// upvalue 访问越界。
+    UpvalueOutOfBounds { index: usize, len: usize },
     /// 兜底：捕获到了意外 `panic`（通常表示 VM 实现 bug）。
     Panic(String),
 }
@@ -57,6 +68,9 @@ impl std::fmt::Display for VmError {
             }
             VmError::StackOutOfBounds { index, len } => {
                 write!(f, "index out of bounds: index={}, len={}", index, len)
+            }
+            VmError::UpvalueOutOfBounds { index, len } => {
+                write!(f, "upvalue out of bounds: index={}, len={}", index, len)
             }
             VmError::Panic(msg) => write!(f, "panic: {}", msg),
         }

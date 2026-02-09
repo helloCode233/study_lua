@@ -1,5 +1,8 @@
 use crate::Value;
 use crate::proto::Proto;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::rc::Rc;
 
 #[derive(Copy, Clone, Debug)]
 pub(crate) enum ResultsSpec {
@@ -7,6 +10,22 @@ pub(crate) enum ResultsSpec {
     Fixed(usize),
     /// 多返回（Lua: Call 的 C=0 / Return 的 B=0 场景会用到 top 来决定数量）。
     Multi,
+}
+
+/// upvalue 的共享引用类型（教学实现采用 `Rc<RefCell<_>>`）。
+///
+/// - 多个闭包如果捕获同一个外层局部变量，它们会持有同一个 `UpvalueRef`
+/// - `RefCell` 让我们在单线程场景下实现可变共享（读写 upvalue）
+pub type UpvalueRef = Rc<RefCell<UpvalueCell>>;
+
+/// upvalue 的两种生命周期状态（Lua 5.x 核心语义）：
+///
+/// - `Open { stack_index }`：仍绑定到某个活动栈槽位，读写都会直接映射到栈
+/// - `Closed(Value)`：外层作用域已结束，值被“封箱”到独立单元中
+#[derive(Clone, Debug)]
+pub enum UpvalueCell {
+    Open { stack_index: usize },
+    Closed(Value),
 }
 
 pub struct CallFrame {
@@ -23,6 +42,10 @@ pub struct CallFrame {
     ///
     /// Lua 5.x 中，“多余参数”不会直接作为寄存器可见，而是通过 `VARARG` 指令按需拷贝进寄存器。
     pub varargs: Vec<Value>,
+    /// 当前函数闭包持有的 upvalues（共享单元，不是值快照）。
+    ///
+    /// 这样 `GETUPVAL/SETUPVAL` 才能实现 Lua 风格“多个闭包共享同一变量单元”的语义。
+    pub upvalues: Vec<UpvalueRef>,
     /// 返回值规格：
     /// - Fixed(n): 固定写回 n 个（n=0 表示丢弃）
     /// - Multi: 多返回，写回后会更新 caller.top
@@ -37,6 +60,10 @@ pub struct Vm {
     pub protos: Vec<Proto>,
     /// 调用栈帧（frames[0] 是 sentinel；Lua 帧从 1 开始）。
     pub frames: Vec<CallFrame>,
+    /// 当前所有“打开状态”的 upvalue（按栈索引组织，便于按作用域批量封闭）。
+    ///
+    /// key = 栈索引，value = 对应 upvalue 共享单元。
+    pub open_upvalues: BTreeMap<usize, UpvalueRef>,
     /// “有效 top”（Lua 风格）：指向栈上第一个空槽位。
     ///
     /// 这个 top 主要服务于 Lua 5.x 的“变参/多返回”语义（B=0 / C=0），但为了保持行为一致，
@@ -60,12 +87,14 @@ impl Vm {
             base: 0,
             top: 0,
             varargs: vec![],
+            upvalues: vec![],
             results: ResultsSpec::Fixed(0),
         };
         Self {
             stack: Vec::new(),
             frames: vec![sentinel],
             protos,
+            open_upvalues: BTreeMap::new(),
             top: 0,
         }
     }

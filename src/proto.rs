@@ -1,5 +1,15 @@
 use crate::Value;
 
+/// 闭包 upvalue 描述（简化版 Lua 5.x）。
+///
+/// - `instack=true`：从当前函数寄存器窗口捕获（按 `R[index]`）
+/// - `instack=false`：从当前函数自身 upvalues 里转发（按 `upvalues[index]`）
+#[derive(Clone, Debug)]
+pub struct UpvalueDesc {
+    pub instack: bool,
+    pub index: usize,
+}
+
 pub struct Proto {
     pub code: Vec<u32>,
     pub consts: Vec<Value>,
@@ -16,4 +26,6 @@ pub struct Proto {
     ///
     /// 注意：这里用 `usize` 简化实现，后面你可以 assert <= 256。
     pub max_stack: usize,
+    /// 该函数声明的 upvalue 捕获规则（供 CLOSURE 构造闭包时使用）。
+    pub upvalues: Vec<UpvalueDesc>,
 }

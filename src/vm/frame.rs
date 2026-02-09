@@ -35,6 +35,10 @@ impl Vm {
     }
 
     pub(crate) fn rollback(&mut self, cp: VmCheckpoint) {
+        // 回滚会让 `top` 退回到 checkpoint；在此之前先封闭将要失效槽位上的 open upvalue，
+        // 避免 upvalue 继续指向被清理/复用的栈位置。
+        let _ = self.close_upvalues_from(cp.top);
+
         // 回滚“有效 top”（Lua 风格：指向第一个空槽位）。
         // 注意：这里不能用 `truncate(top)` 来同步 Vec.len，因为寄存器窗口需要更大的容量/可访问区间：
         // - `Vm.top` 只表示“有效 top”（用于 B=0/C=0 的变参/多返回语义）

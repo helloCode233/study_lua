@@ -21,12 +21,14 @@
 //! - `stack.rs`：寄存器/栈访问与 top 维护（含 `set_top`）
 //! - `frame.rs`：frame 与 checkpoint/rollback
 //! - `common.rs`：小工具（类型检查、统一的 OOB 错误）
+//! - `upvalue.rs`：open/closed upvalue 捕获、读写与封闭
 pub mod call;
 pub mod common;
 pub mod execute;
 pub mod frame;
 pub mod model;
 pub mod stack;
+pub mod upvalue;
 
 // 对外只暴露 VM 类型，隐藏内部模块结构（tests/示例可直接 `use study_lua::vm::Vm;`）。
 pub use model::Vm;
